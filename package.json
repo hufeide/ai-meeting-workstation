@@ -1,0 +1,50 @@
+{
+  "name": "ai-meeting-workstation",
+  "version": "0.1.0",
+  "description": "Local-first AI meeting transcription and collaboration workstation",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:client": "vite --config src/client/vite.config.ts",
+    "dev:server": "tsx watch src/server/index.ts",
+    "doctor": "tsx src/server/config/doctor.ts",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build --config src/client/vite.config.ts",
+    "build:server": "tsc -p src/server/tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "better-sqlite3": "^12.4.1",
+    "concurrently": "^9.2.1",
+    "dotenv": "^17.4.2",
+    "express": "^5.1.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tsx": "^4.20.6",
+    "vite": "^7.1.12",
+    "ws": "^8.18.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.9.2",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@types/ws": "^8.18.1",
+    "eslint": "^9.39.1",
+    "globals": "^16.4.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.2",
+    "vitest": "^4.0.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
