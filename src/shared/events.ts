@@ -15,5 +15,6 @@ export type ProductEvent =
   | { type: "codex.turn.failed"; aiTurnId: string; message: string }
   | { type: "asr.status"; status: AsrStatus }
   | { type: "asr.error"; code: AsrErrorCode; message: string; retryable: boolean }
+  | { type: "asr.log"; message: string }
   | { type: "audio.asset.saved"; asset: AudioAssetDto }
   | { type: "codex.status"; status: CodexStatus };

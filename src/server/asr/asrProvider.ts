@@ -23,6 +23,7 @@ export type AsrProviderStartInput = {
   onFinal: (utterance: TranscriptCandidate) => void;
   onError: (message: string) => void;
   onLog?: (entry: Omit<AsrEventLogEntry, "timestamp">) => void;
+  abort?: AbortSignal;
 };
 
 export interface AsrProvider {

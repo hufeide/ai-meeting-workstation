@@ -7,6 +7,8 @@ import { AudioGateway } from "./audio/audioGateway";
 import { FunasrFileTranscriber } from "./asr/funasrFile";
 import { MockAsrService } from "./asr/mockAsr";
 import { VolcengineAsrProvider } from "./asr/volcengineAsr";
+import { FunasrRealtimeAsrProvider } from "./asr/funasrRealtimeAsr";
+import { getFunasrSelfCheck, runFunasrSelfCheck } from "./asr/funasrSelfCheck";
 import { VolcengineFileTranscriber } from "./asr/volcengineFile";
 import { BrainProviderRegistry } from "./codex/brainRegistry";
 import { loadServerConfig } from "./config/serverConfig";
@@ -51,6 +53,14 @@ const audioGateway = new AudioGateway({
   eventHub,
   storagePaths,
   getAsrProvider: (discussion) => {
+    if (discussion.asrProvider === "funasr-realtime") {
+      return new FunasrRealtimeAsrProvider({
+        pythonPath: config.funasrPythonPath,
+        asrHome: config.funasrAsrHome,
+        device: config.funasrDevice,
+        speakerDiarization: true
+      });
+    }
     if (discussion.asrProvider !== "volcengine") return undefined;
     const settings = settingsStore.load();
     return new VolcengineAsrProvider({
@@ -81,6 +91,14 @@ const demoAudioGateway = new AudioGateway({
   storagePaths: demoStoragePaths,
   socketPath: "/demo-audio",
   getAsrProvider: (discussion) => {
+    if (discussion.asrProvider === "funasr-realtime") {
+      return new FunasrRealtimeAsrProvider({
+        pythonPath: config.funasrPythonPath,
+        asrHome: config.funasrAsrHome,
+        device: config.funasrDevice,
+        speakerDiarization: true
+      });
+    }
     if (discussion.asrProvider !== "volcengine") return undefined;
     const settings = settingsStore.load();
     return new VolcengineAsrProvider({
@@ -113,6 +131,20 @@ app.get("/api/health", (_request, response) => {
     service: "ai-meeting-workstation",
     mode: config.defaultMode
   });
+});
+
+app.get("/api/asr/self-check", async (_request, response) => {
+  const rerun = _request.query.rerun === "1" || _request.query.rerun === "true";
+  if (rerun) {
+    const result = await runFunasrSelfCheck({
+      pythonPath: config.funasrPythonPath,
+      asrHome: config.funasrAsrHome,
+      device: config.funasrDevice
+    });
+    response.json(result);
+    return;
+  }
+  response.json(getFunasrSelfCheck());
 });
 
 app.get("/api/config", (_request, response) => {
@@ -207,6 +239,13 @@ app.use(
     storagePaths
   })
 );
+
+// 启动即后台自检一次本地 FunASR 模型是否可加载/转写（不阻塞启动）。
+void runFunasrSelfCheck({
+  pythonPath: config.funasrPythonPath,
+  asrHome: config.funasrAsrHome,
+  device: config.funasrDevice
+});
 
 server.listen(config.port, config.host, () => {
   console.log(`AI Meeting Workstation server listening on http://${config.host}:${config.port}`);

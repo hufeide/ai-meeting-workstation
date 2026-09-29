@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const discussionModeSchema = z.enum(["mock", "real"]);
-export const asrProviderSchema = z.enum(["mock", "volcengine", "volcengine-file", "funasr"]);
+export const asrProviderSchema = z.enum(["mock", "volcengine", "volcengine-file", "funasr", "funasr-realtime"]);
 export const brainProviderSchema = z.enum(["mock", "codex-cli", "claude-cli", "deepseek", "openai", "local-qwen"]);
 
 export const createDiscussionSchema = z.object({

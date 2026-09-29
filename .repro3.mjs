@@ -1,0 +1,13 @@
+import WebSocket from "ws";
+import { readFileSync } from "node:fs";
+const BASE="http://127.0.0.1:8787";
+const r=await fetch(`${BASE}/api/discussions`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({background:"repro3 long",projectPath:process.cwd(),participants:[{displayName:"甲"},{displayName:"乙"}],asrProvider:"funasr-realtime",mode:"real"})});
+const d=await r.json(); const id=d.id; console.log("created",id);
+const pcm=readFileSync("/tmp/repro.pcm");
+const ev=new WebSocket(`ws://127.0.0.1:8787/ws?discussionId=${id}`);
+ev.on("message",(m)=>{const e=JSON.parse(m.toString());if(["asr.status","asr.error","transcript.final","transcript.partial"].includes(e.type))console.log("WS",e.type,e.status??"",e.message??"",(e.utterance?.text||"").slice(0,60));});
+const audio=new WebSocket(`ws://127.0.0.1:8787/audio?discussionId=${id}&sampleRate=16000`);
+audio.binaryType="arraybuffer"; let off=0; let t;
+audio.on("open",()=>{console.log("AUDIO OPEN",new Date().toISOString());t=setInterval(()=>{if(off>=pcm.length)off=0;const b=pcm.subarray(off,off+2730);off+=2730;if(audio.readyState===WebSocket.OPEN)audio.send(b);},60);});
+audio.on("close",(c,rr)=>console.log("AUDIO CLOSE",c,rr?.toString()));
+setTimeout(()=>{clearInterval(t);audio.close();ev.close();console.log("DONE",new Date().toISOString());process.exit(0);},115000);

@@ -8,7 +8,7 @@ import type { EventHub } from "../ws/eventHub";
 import { WavWriter } from "./wavWriter";
 import type { UtteranceDto } from "../../shared/types";
 import { AsrEventLogger, type AsrEventLogEntry } from "../asr/asrEventLog";
-import type { AsrProvider } from "../asr/asrProvider";
+import type { AsrProvider, AsrProviderSession } from "../asr/asrProvider";
 
 export class AudioGateway {
   constructor(
@@ -55,7 +55,21 @@ export class AudioGateway {
       const writer = new WavWriter(wavPath, Number.isFinite(sampleRate) ? sampleRate : 48000);
       const asrLog = new AsrEventLogger(join(discussionDir, "raw-asr-events.ndjson"));
       const pendingChunks: Buffer[] = [];
-      let asrSession: Awaited<ReturnType<AsrProvider["startSession"]>> | undefined;
+      // 保活：浏览器/代理常因长时间无服务端→客户端流量而断开空闲 WebSocket。
+      // 周期性发送 ping 帧，避免实时转写期间（尤其模型加载的 ~78s）连接被静默断开。
+      const pingTimer = setInterval(() => {
+        if (socket.readyState === 1) {
+          try {
+            socket.ping();
+          } catch {
+            // 忽略：连接可能正在关闭
+          }
+        }
+      }, 20000);
+      socket.on("error", () => clearInterval(pingTimer));
+      let asrSession: AsrProviderSession | undefined;
+      let asrSessionPromise: Promise<AsrProviderSession> | undefined;
+      let abortController: AbortController | undefined;
       let hasReceivedAsrResult = false;
 
       const appendLog = (entry: Omit<AsrEventLogEntry, "timestamp">) => asrLog.append(entry);
@@ -101,7 +115,8 @@ export class AudioGateway {
           payloadSummary: "opening volcengine websocket"
         });
         this.deps.eventHub.publish(discussionId, { type: "asr.status", status: "connecting" });
-        void asrProvider!
+        abortController = new AbortController();
+        asrSessionPromise = asrProvider!
           .startSession({
             discussionId,
             onPartial: (utterance) => {
@@ -156,8 +171,15 @@ export class AudioGateway {
                 retryable: true
               });
             },
-            onLog: appendLog
-          })
+            onLog: (entry) => {
+              appendLog(entry);
+              if (entry.eventType === "realtime-stderr") {
+                this.deps.eventHub.publish(discussionId, { type: "asr.log", message: entry.payloadSummary });
+              }
+            },
+            abort: abortController.signal
+          });
+        asrSessionPromise
           .then((session) => {
             asrSession = session;
             appendLog({
@@ -173,6 +195,11 @@ export class AudioGateway {
           })
           .catch((error: unknown) => {
             const message = error instanceof Error ? error.message : "火山 ASR 建连失败。";
+            if (abortController?.signal.aborted) {
+              // 用户在模型加载期间主动停止/刷新：属正常中断，不报错误。
+              this.deps.eventHub.publish(discussionId, { type: "asr.status", status: "closed" });
+              return;
+            }
             appendLog({
               direction: "server",
               eventType: "failed",
@@ -212,7 +239,12 @@ export class AudioGateway {
       });
 
       socket.on("close", () => {
+        clearInterval(pingTimer);
         asrSession?.close();
+        // 模型尚未加载完成时，asrSession 还没赋值，必须通过 abort 信号立即杀掉桥进程，
+        // 否则会留下长期占用 GPU 的孤儿 python（多次重试后 GPU 占满，新会话 OOM 崩溃）。
+        abortController?.abort();
+        void asrSessionPromise?.then((session) => session.close()).catch(() => {});
         appendLog({
           direction: "server",
           eventType: "closed",

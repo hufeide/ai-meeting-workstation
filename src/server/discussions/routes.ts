@@ -115,6 +115,10 @@ export function createDiscussionRouter(deps: {
       response.status(404).json({ error: "discussion not found" });
       return;
     }
+    if (discussion.asrProvider !== "volcengine-file" && discussion.asrProvider !== "funasr") {
+      response.status(400).json({ error: "该讨论不是录音文件识别档，不支持上传转写。" });
+      return;
+    }
 
     try {
       const filename =

@@ -92,9 +92,15 @@ describe("loadServerConfig", () => {
   });
 
   it("rejects an unsupported FunASR inference device", () => {
-    expect(() => loadServerConfig({ CODEX_PROVIDER: "mock", FUNASR_DEVICE: "cuda" })).toThrow(
+    expect(() => loadServerConfig({ CODEX_PROVIDER: "mock", FUNASR_DEVICE: "tpu" })).toThrow(
       "FUNASR_DEVICE"
     );
+  });
+
+  it("allows selecting the CUDA inference device", () => {
+    const config = loadServerConfig({ CODEX_PROVIDER: "mock", FUNASR_DEVICE: "cuda:0" });
+
+    expect(config.funasrDevice).toBe("cuda:0");
   });
 
   it("requires CODEX_CLI_PATH when the CLI provider is enabled", () => {

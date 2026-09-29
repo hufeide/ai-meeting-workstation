@@ -16,7 +16,7 @@ type FunasrFileTranscriberConfig = {
   scriptPath?: string;
   asrHome?: string;
   timeoutMs?: number;
-  device?: "auto" | "cpu" | "mps";
+  device?: "auto" | "cpu" | "mps" | "cuda" | `cuda:${number}`;
   hotwordFile?: string;
 };
 
@@ -32,7 +32,7 @@ export class FunasrFileTranscriber {
   private readonly scriptPath: string;
   private readonly asrHome: string;
   private readonly timeoutMs: number;
-  private readonly device: "auto" | "cpu" | "mps";
+  private readonly device: "auto" | "cpu" | "mps" | "cuda" | `cuda:${number}`;
   private readonly hotwordFile?: string;
 
   constructor(

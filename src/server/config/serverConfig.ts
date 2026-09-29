@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import type { DiscussionMode } from "../../shared/types";
 
 export type CodexProviderMode = "mock" | "cli";
-export type FunasrDevice = "auto" | "cpu" | "mps";
+export type FunasrDevice = "auto" | "cpu" | "mps" | "cuda" | `cuda:${number}`;
 
 export type ServerConfig = {
   host: string;
@@ -84,7 +84,8 @@ export function loadServerConfig(env: NodeJS.ProcessEnv = process.env, cwd = pro
 
 function readFunasrDevice(value: string): FunasrDevice {
   if (value === "auto" || value === "cpu" || value === "mps") return value;
-  throw new Error(`FUNASR_DEVICE 必须是 auto、cpu 或 mps。当前值：${value}`);
+  if (value === "cuda" || /^cuda:\d+$/.test(value)) return value as FunasrDevice;
+  throw new Error(`FUNASR_DEVICE 必须是 auto、cpu、mps、cuda 或 cuda:N。当前值：${value}`);
 }
 
 function readPort(value: string): number {

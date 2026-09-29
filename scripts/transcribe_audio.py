@@ -41,9 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ncpu", type=int, default=4, help="CPU workers for FunASR.")
     parser.add_argument(
         "--device",
-        choices=("auto", "cpu", "mps"),
         default="auto",
-        help="Inference device. auto uses Apple MPS when available, otherwise CPU.",
+        help="Inference device: auto, cpu, mps, or cuda[:N] (e.g. cuda / cuda:0).",
     )
     parser.add_argument(
         "--speaker-diarization",
@@ -68,16 +67,14 @@ def require_path(path: Path, label: str) -> None:
         raise SystemExit(f"Missing {label}: {path}")
 
 
-def resolve_model_path(asr_home: Path, folder: str) -> Path:
-    cache_root = asr_home / ".modelscope_cache"
-    candidates = [
-        cache_root / "models" / "iic" / folder,
-        cache_root / "iic" / folder,
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
+def require_python_module(module: str, label: str) -> None:
+    try:
+        __import__(module)
+    except ImportError:
+        raise SystemExit(
+            f"缺少 Python 依赖 {label}（模块 {module} 无法导入）："
+            f"请在该 python 环境中安装，例如 pip install funasr modelscope torch torchaudio"
+        )
 
 
 def convert_to_wav(source: Path, wav_path: Path) -> None:
@@ -105,42 +102,52 @@ def convert_to_wav(source: Path, wav_path: Path) -> None:
 
 
 def resolve_device(requested: str) -> str:
-    if requested != "auto":
+    requested = requested.strip().lower()
+    if requested in ("cpu", "mps"):
         return requested
+    if requested == "auto":
+        os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+        import torch
 
-    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
-    import torch
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+    if requested == "cuda" or requested.startswith("cuda:"):
+        import torch
 
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+        if not torch.cuda.is_available():
+            raise SystemExit(
+                f"请求使用 GPU 设备 {requested}，但 torch.cuda.is_available() 为 False；"
+                f"请确认 PyTorch 安装了 CUDA 版本，或改用 --device cpu。"
+            )
+        return requested
+    raise SystemExit(
+        f"不支持的 --device 值：{requested!r}。可选：auto、cpu、mps、cuda、cuda:N。"
+    )
 
 
 def load_model(asr_home: Path, ncpu: int, speaker_diarization: bool, device: str):
-    model_paths = {key: resolve_model_path(asr_home, folder) for key, folder in MODEL_DIRS.items()}
-    required_keys = ["asr", "vad", "punc", "timestamp"]
-    if speaker_diarization:
-        required_keys.append("speaker")
-    for key in required_keys:
-        path = model_paths[key]
-        require_path(path, f"{key} model")
-
     os.environ["MODELSCOPE_CACHE"] = str(asr_home / ".modelscope_cache")
     os.environ["HF_HOME"] = str(asr_home / ".hf_cache")
+
+    # funasr 1.4+ registers models by ModelScope hub id (iic/<repo>) rather than a
+    # local path, and resolves cached snapshots via MODELSCOPE_CACHE. Use hub ids so
+    # the pinned model snapshots download_funasr_models.py fetched are loaded correctly.
+    hub_ids = {key: f"iic/{folder}" for key, folder in MODEL_DIRS.items()}
 
     from funasr import AutoModel
 
     model_kwargs = {
-        "model": str(model_paths["asr"]),
-        "vad_model": str(model_paths["vad"]),
-        "punc_model": str(model_paths["punc"]),
-        "timestamp_model": str(model_paths["timestamp"]),
+        "model": hub_ids["asr"],
+        "vad_model": hub_ids["vad"],
+        "punc_model": hub_ids["punc"],
+        "timestamp_model": hub_ids["timestamp"],
         "device": device,
         "disable_update": True,
         "ncpu": ncpu,
     }
     if speaker_diarization:
-        model_kwargs["spk_model"] = str(model_paths["speaker"])
+        model_kwargs["spk_model"] = hub_ids["speaker"]
 
     return AutoModel(**model_kwargs)
 
@@ -282,7 +289,7 @@ def main() -> int:
     asr_home = Path(args.asr_home).expanduser().resolve()
 
     require_path(source, "input file")
-    require_path(asr_home / ".venv", "ASR virtual environment")
+    require_python_module("funasr", "FunASR")
     require_path(asr_home / ".modelscope_cache", "ModelScope cache")
 
     hotword_text = read_hotwords(args.hotwords, args.hotword_file)

@@ -1773,6 +1773,17 @@ body {
   animation: live-breathe 1.3s ease-in-out infinite;
 }
 
+.asr-progress {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted, #6b7280);
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .topic-stage > small {
   max-width: 760px;
   color: #7b817e;

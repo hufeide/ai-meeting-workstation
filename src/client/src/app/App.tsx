@@ -83,7 +83,7 @@ const initialFormState: FormState = {
   customerProfile: defaultCustomerProfile(""),
   participants: createDefaultParticipants(),
   projectPath: ".",
-  asrProvider: "volcengine",
+  asrProvider: "funasr-realtime",
   brainProvider: "deepseek",
   brainModel: "deepseek-v4-pro"
 };
@@ -105,6 +105,7 @@ export function App() {
   const [fallbackLoaded, setFallbackLoaded] = useState(false);
   const [discussion, setDiscussion] = useState<DiscussionDetailDto | null>(null);
   const [asrStatus, setAsrStatus] = useState<AsrStatus>("idle");
+  const [asrLog, setAsrLog] = useState<string>("");
   const [isStarting, setIsStarting] = useState(false);
   const [isInvitingCodex, setIsInvitingCodex] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -139,6 +140,8 @@ export function App() {
     source: MediaStreamAudioSourceNode;
     stream: MediaStream;
     socket: WebSocket;
+    visibilityHandler: () => void;
+    watchdog: ReturnType<typeof setTimeout>;
   } | null>(null);
   const conversationFeedRef = useRef<HTMLDivElement | null>(null);
   const aiTurnFlightRef = useRef(false);
@@ -147,14 +150,14 @@ export function App() {
     discussionId: discussion?.id,
     isRecording,
     isActive: discussion?.status === "active",
-    isLiveAsr: discussion?.asrProvider === "volcengine"
+    isLiveAsr: discussion?.asrProvider === "volcengine" || discussion?.asrProvider === "funasr-realtime"
   });
   const inviteByVoiceRef = useRef<(guidance: string) => void>(() => undefined);
   liveMeetingRef.current = {
     discussionId: discussion?.id,
     isRecording,
     isActive: discussion?.status === "active",
-    isLiveAsr: discussion?.asrProvider === "volcengine"
+    isLiveAsr: discussion?.asrProvider === "volcengine" || discussion?.asrProvider === "funasr-realtime"
   };
   inviteByVoiceRef.current = (guidance) => { void inviteAi(guidance, "voice"); };
   if (!voiceInvitationRef.current) {
@@ -205,6 +208,12 @@ export function App() {
         if (event.status === "receiving") {
           setAsrDiagnostics((current) => ({ ...current, asrConnected: true, asrReceiving: true }));
         }
+        if (event.status === "connected" || event.status === "receiving" || event.status === "closed" || event.status === "failed") {
+          setAsrLog("");
+        }
+      }
+      if (event.type === "asr.log") {
+        setAsrLog(event.message);
       }
       if (event.type === "asr.error") {
         setAsrStatus("failed");
@@ -302,6 +311,10 @@ export function App() {
   const settingsHasAlert = Boolean(errorMessage || speakerLabels.length > 0 || asrStatus === "failed");
   const isFileMode = taskMode === "file";
   const isFileResult = Boolean(isFileMode && discussion && finalUtteranceCount > 0);
+  const asrProgress =
+    asrStatus === "connecting" && asrLog
+      ? `正在加载本地模型… ${asrLog.replace(/\s+/g, " ").slice(-50)}`
+      : "";
   const isTaskBusy = isAudioFileUploading || isFallbackLoading || isStarting || isAudioStarting || isRecording;
 
   useEffect(() => {
@@ -535,7 +548,7 @@ export function App() {
     } else {
       setSelectedAudioFile(null);
       setFileTranscriptionName("");
-      setForm((current) => ({ ...current, asrProvider: current.asrProvider === "volcengine" || current.asrProvider === "mock" ? current.asrProvider : "volcengine" }));
+      setForm((current) => ({ ...current, asrProvider: current.asrProvider === "funasr-realtime" || current.asrProvider === "volcengine" || current.asrProvider === "mock" ? current.asrProvider : "funasr-realtime" }));
     }
   }
 
@@ -805,6 +818,20 @@ export function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       setAsrDiagnostics((current) => ({ ...current, micAuthorized: true, errorMessage: undefined, retryable: false }));
       const context = new AudioContext();
+      // 浏览器自动播放策略下，AudioContext 常以 suspended 状态创建；不 resume 的话
+      // ScriptProcessor 不会触发 onaudioprocess，麦克风音频根本不会发出去，
+      // 于是模型加载完也收不到任何转写（看起来像“加载完就卸载了”）。
+      try {
+        await context.resume();
+      } catch {
+        // 忽略：部分浏览器 resume 会 reject，但上下文仍可能随后变为 running
+      }
+      if (context.state === "suspended") {
+        setAsrDiagnostics((current) => ({
+          ...current,
+          errorMessage: "浏览器音频上下文处于挂起状态，麦克风音频无法采集。请点击页面任意位置后重试，或检查浏览器是否禁用了自动播放。"
+        }));
+      }
       const source = context.createMediaStreamSource(stream);
       const processor = context.createScriptProcessor(4096, 1, 1);
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -814,6 +841,25 @@ export function App() {
       );
       socket.binaryType = "arraybuffer";
 
+      // 标签页切到后台时浏览器会挂起/节流 AudioContext，导致 onaudioprocess 不再触发、
+      // 麦克风音频停发；回到前台时重新 resume，避免“模型加载完却没转写”。
+      const visibilityHandler = () => {
+        if (document.visibilityState === "visible" && context.state === "suspended") {
+          void context.resume().catch(() => undefined);
+        }
+      };
+      document.addEventListener("visibilitychange", visibilityHandler);
+
+      // 看门狗：启动 3s 后仍无音频发出，给出明确提示（多半是 AudioContext 被挂起）。
+      const watchdog = setTimeout(() => {
+        if (!hasSentAudioRef.current) {
+          setAsrDiagnostics((current) => ({
+            ...current,
+            errorMessage: "已启动数秒仍未收到麦克风音频：请点击页面任意位置、确认标签页处于前台，并允许麦克风权限后重试。"
+          }));
+        }
+      }, 3000);
+
       processor.onaudioprocess = (event) => {
         const output = event.outputBuffer.getChannelData(0);
         output.fill(0);
@@ -821,13 +867,14 @@ export function App() {
         socket.send(float32ToPcm16(event.inputBuffer.getChannelData(0), context.sampleRate, 16000));
         if (!hasSentAudioRef.current) {
           hasSentAudioRef.current = true;
-          setAsrDiagnostics((current) => ({ ...current, audioSending: true }));
+          clearTimeout(watchdog);
+          setAsrDiagnostics((current) => ({ ...current, audioSending: true, errorMessage: undefined }));
         }
       };
 
       source.connect(processor);
       processor.connect(context.destination);
-      audioSessionRef.current = { context, processor, source, stream, socket };
+      audioSessionRef.current = { context, processor, source, stream, socket, visibilityHandler, watchdog };
       setIsRecording(true);
     } catch (error) {
       const message = error instanceof Error ? error.message : "无法启动麦克风。";
@@ -844,6 +891,8 @@ export function App() {
     voiceInvitationRef.current?.reset();
     const session = audioSessionRef.current;
     if (!session) return;
+    clearTimeout(session.watchdog);
+    document.removeEventListener("visibilitychange", session.visibilityHandler);
     session.processor.disconnect();
     session.source.disconnect();
     session.stream.getTracks().forEach((track) => track.stop());
@@ -1300,17 +1349,20 @@ export function App() {
                   </button>
                 </>
               ) : (
-                <button
-                  type="button"
-                  className={isRecording || isAudioStarting ? "listen-button live" : "listen-button"}
-                  onClick={toggleAudioCapture}
-                  disabled={isAudioStarting || isFallbackLoading}
-                  aria-busy={isAudioStarting}
-                  aria-pressed={isRecording}
-                >
-                  <span className="mic-glyph" aria-hidden="true" />
-                  {isAudioStarting ? "正在请求麦克风…" : isRecording ? "停止实时转写" : "开始实时转写"}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={isRecording || isAudioStarting ? "listen-button live" : "listen-button"}
+                    onClick={toggleAudioCapture}
+                    disabled={isAudioStarting || isFallbackLoading}
+                    aria-busy={isAudioStarting}
+                    aria-pressed={isRecording}
+                  >
+                    <span className="mic-glyph" aria-hidden="true" />
+                    {isAudioStarting ? "正在请求麦克风…" : isRecording ? "停止实时转写" : "开始实时转写"}
+                  </button>
+                  {asrProgress}
+                </>
               )}
               {isDemoMode ? (
                 <button
@@ -1573,6 +1625,7 @@ function HiddenSettings(props: {
               ) : (
                 <>
                   <option value="volcengine">火山豆包流式 ASR 2.0</option>
+                  <option value="funasr-realtime">本地 FunASR 实时（隐私优先）</option>
                   <option value="mock">Mock 演示</option>
                 </>
               )}

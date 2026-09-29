@@ -20,9 +20,14 @@ MODELS = (
 
 
 def installed(cache: Path, name: str, weight: str) -> bool:
+    candidates = (
+        cache / "models" / ("iic--" + name),
+        cache / "models" / "iic" / name,
+        cache / "iic" / name,
+    )
     return any(
         (base / "config.yaml").is_file() and (base / weight).is_file()
-        for base in (cache / "models" / "iic" / name, cache / "iic" / name)
+        for base in candidates
     )
 
 
@@ -39,8 +44,8 @@ def main() -> None:
             print(f"[{index}/5] {label} 已存在，跳过", flush=True)
             continue
         print(f"[{index}/5] 正在下载 {label}：iic/{name}", flush=True)
-        snapshot_download(f"iic/{name}", revision="master", cache_dir=str(cache))
-        if not installed(cache, name, weight):
+        local_dir = snapshot_download(f"iic/{name}", revision="master", cache_dir=str(cache))
+        if not ((Path(local_dir) / "config.yaml").is_file() and (Path(local_dir) / weight).is_file()):
             raise RuntimeError(f"{label} 下载返回成功，但缺少 config.yaml 或 {weight}；请重新运行安装器。")
 
     print("5 个本地转写模型已就绪。", flush=True)
