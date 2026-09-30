@@ -33,6 +33,7 @@ CHUNK_MS = 200
 WINDOW_BYTES = int(CHUNK_MS * SR / 1000) * 2  # 200ms/窗 = 6400 字节（s16le）
 STRIDE = 9600  # 600ms @16k：流式识别窗（chunk_size[1]=10 -> 10*60ms）
 MIN_SEG_SAMPLES = int(0.25 * SR)  # 短于 0.25s 的段丢弃
+MAX_SEG_SAMPLES = int(20 * SR)  # 长语音安全网：单段超过 20s 强制 flush 出 final，避免长录音一直不出字 / 流式缓存无限增长
 
 HUB = {
     "vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
@@ -108,7 +109,8 @@ class Session:
         self.spk_prev = 0
         self.vad_cache: dict = {}
         self.seg_open: bool = False           # 当前是否处于“检测到语音”区间
-        self.frames_asr: list[bytes] = []     # 语音激活期间累积的原始 PCM（bytes），供 final 整段离线解码
+        self.seg_samples: int = 0             # 当前段已累积样本数（长语音安全网用）
+        self.frames_asr: list[bytes] = []     # 语音激活期间累积的原始 PCM（bytes），供 SPK 嵌入
         self.stream_cache: dict = {}          # 在线流式解码 cache（600ms 窗流式切片用，跨调用保持）
         self.stream_buf = np.zeros(0, dtype=np.float32)
         self.last_partial = ""
@@ -163,27 +165,28 @@ class Session:
             return ""
 
     def emit_final(self) -> None:
-        # 终稿音频来自语音激活期间累积的 frames_asr（原始 PCM），不依赖 VAD 的 value 索引切片
-        # （流式 VAD 的 value 是窗内相对索引，直接切片会得到极小片段 → 之前“今天。”“嗯。”乱码的根因）。
+        """句子结束（或长段强制 flush）时产出终稿。
+
+        终稿用整段离线解码 asr.generate(input=seg) —— 这是本服务唯一能稳定产出正确中文的路径
+        （流式 Paraformer 在本服务的 VAD 分段下会被频繁重置 cache，输出退化成“好的好的”乱码）。
+        离线解码按 VAD 切出的小段进行，单段通常 5–7s，耗时 ~0.6–0.8s；长段由 20s 安全网切成
+        较小段，不会出现 67s 一次性解码的 7.4s 长阻塞。整段解码在 asyncio.to_thread 中执行，
+        不冻结事件循环。seg_open / frames_asr 由调用方管理。"""
         seg_bytes = b"".join(self.frames_asr)
         seg = np.frombuffer(seg_bytes, dtype="<i2").astype("float32") / 32768.0 if seg_bytes else np.zeros(0, dtype=np.float32)
         raw_text = ""
         if seg.size >= MIN_SEG_SAMPLES:
             try:
-                # 关键修复：整段离线解码（不传 chunk_size，让模型走 offline 路径），
-                # 实测产出正确全文（如“今天我们用成远科技…复盘会议…客户回访表…”）。
-                # 旧的 batch_size_s=60 / is_final 整段流式两种方式都会把 Seaco 流式模型跑成乱码。
                 r = self.asr.generate(input=seg)
                 raw_text = clean_stream(r[0].get("text") or "")
             except Exception:
                 raw_text = ""
-            # 标点模型加标点（四个模型之一），解决“实时没有标点”的问题
+            # 标点模型加标点（解决“实时没有标点”），并补回英文空格（见 fix_spaces）
             if self.punc is not None and raw_text:
                 try:
                     raw_text = self.punc.generate(input=raw_text)[0].get("text") or raw_text
                 except Exception:
                     pass
-                # 标点模型会删掉英文周围的空格，补回（见 fix_spaces）
                 raw_text = fix_spaces(raw_text)
         speaker = self.cluster_speaker(seg) if self.speaker_enabled else "speaker_0"
         self.out.append({
@@ -203,24 +206,6 @@ class Session:
         self.out = []
         if window:
             chunk = np.frombuffer(window, dtype="<i2").astype("float32") / 32768.0
-            # ---- 在线流式 partial：累积到 600ms 窗后做增量解码，用 merge_text 累积成完整句 ----
-            self.stream_buf = np.concatenate([self.stream_buf, chunk])
-            while self.stream_buf.size >= STRIDE:
-                sub = self.stream_buf[:STRIDE]
-                self.stream_buf = self.stream_buf[STRIDE:]
-                text = self.stream_decode(sub, False)
-                if self.seg_open and text:
-                    accum = merge_text(self.partial_accum, text)
-                    if accum != self.last_partial:
-                        self.partial_accum = accum
-                        self.last_partial = accum
-                        self.out.append({
-                            "mode": "2pass-online",
-                            "text": accum,
-                            "is_final": False,
-                            "wav_name": self.wav_name,
-                            "spk_name": "speaker_0",
-                        })
             # ---- VAD 流式检测句子边界（只用 start/end 布尔，不用其 value 索引切片）----
             try:
                 res = self.vad.generate(
@@ -233,40 +218,41 @@ class Session:
             except Exception:
                 res = None
             segs = (res[0].get("value") or []) if res else []
-            seg_started = False
             seg_ended = False
             for s, e in segs:
                 if s != -1 and e == -1:
                     self.seg_open = True
                     self.frames_asr = []
-                    self.stream_cache = {}
-                    self.stream_buf = np.zeros(0, dtype=np.float32)
-                    self.last_partial = ""
-                    self.partial_accum = ""
-                    seg_started = True
+                    self.seg_samples = 0
                 elif s == -1 and e != -1:
                     seg_ended = True
                 elif s != -1 and e != -1:
                     self.seg_open = True
                     self.frames_asr = []
-                    self.stream_cache = {}
-                    self.stream_buf = np.zeros(0, dtype=np.float32)
-                    self.last_partial = ""
-                    self.partial_accum = ""
-                    seg_started = True
+                    self.seg_samples = 0
                     seg_ended = True
-            # 累积语音段原始音频（注意：start/end 同窗时本窗也要计入）
+            # 累积语音段原始音频（供整段离线解码 + SPK 嵌入）
             if self.seg_open:
                 self.frames_asr.append(window)
-            # 句子结束 → 用整段累积音频做离线解码
+                self.seg_samples += chunk.size
+            # 句子结束 → 终稿
             if seg_ended:
                 self.emit_final()
                 self.seg_open = False
                 self.frames_asr = []
+                self.seg_samples = 0
+            # 长语音安全网：单段超过 30s 强制 flush（不真正关闭 seg_open，继续同一段，
+            # 仅重置流式缓存，避免缓存无限增长导致后续输出退化 / 不出字）
+            elif self.seg_open and self.seg_samples >= MAX_SEG_SAMPLES:
+                self.emit_final()
+                self.frames_asr = []
+                self.seg_samples = 0
+                self.seg_open = True
         if is_final and self.seg_open:
             self.emit_final()
             self.seg_open = False
             self.frames_asr = []
+            self.seg_samples = 0
         return self.out
 
     def finish(self) -> list[dict]:
@@ -361,6 +347,8 @@ async def handler(websocket, models, speaker_enabled):
                     if session is not None:
                         for d in session.finish():
                             await websocket.send(json.dumps(d, ensure_ascii=False))
+                    # 通知客户端本路已结束（realtime_funasr.py 在等待该确认后才退出，避免卡 10s）
+                    await websocket.send(json.dumps({"is_end": True}, ensure_ascii=False))
                     break
             else:  # 二进制 PCM 分片
                 if session is None:
