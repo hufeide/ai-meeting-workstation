@@ -131,7 +131,7 @@ export class DiscussionRepository {
           projectPath: input.projectPath,
           mode: input.mode,
           customerId: input.customerId || null,
-          asrProvider: input.asrProvider ?? (input.mode === "mock" ? "mock" : "volcengine"),
+          asrProvider: input.asrProvider ?? (input.mode === "mock" ? "mock" : "funasr-realtime"),
           brainProvider: input.brainProvider ?? "mock",
           brainModel: input.brainModel || null,
           codexThreadId,

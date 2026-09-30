@@ -28,7 +28,7 @@ export type LocalSettings = {
 };
 
 const DEFAULT_SETTINGS: LocalSettings = {
-  asrProvider: "volcengine",
+  asrProvider: "funasr-realtime",
   brainProvider: "deepseek",
   brainModel: "deepseek-v4-pro",
   claudePath: "claude",
